@@ -49,24 +49,61 @@ class PoseDetector(VideoTransformerBase):
                 landmarks = result.pose_landmarks[0]
                 height, width = img.shape[:2]
                 
-                # 绘制骨架
-                connections = [
-                    (11, 12), (11, 13), (13, 15), (12, 14), (14, 16),
-                    (11, 23), (12, 24), (23, 24), (23, 25), (24, 26),
-                    (25, 27), (26, 28)
-                ]
+                def get_point(landmark_id):
+                    return (
+                        int(landmarks[landmark_id].x * width),
+                        int(landmarks[landmark_id].y * height)
+                    )
                 
-                for id1, id2 in connections:
-                    if id1 < len(landmarks) and id2 < len(landmarks):
-                        pt1 = (int(landmarks[id1].x * width), int(landmarks[id1].y * height))
-                        pt2 = (int(landmarks[id2].x * width), int(landmarks[id2].y * height))
-                        cv2.line(img, pt1, pt2, (0, 255, 0), 2)
+                # 提取关键点
+                nose = get_point(0)
+                left_shoulder = get_point(11)
+                right_shoulder = get_point(12)
+                left_elbow = get_point(13)
+                right_elbow = get_point(14)
+                left_wrist = get_point(15)
+                right_wrist = get_point(16)
+                left_hip = get_point(23)
+                right_hip = get_point(24)
+                left_knee = get_point(25)
+                right_knee = get_point(26)
+                left_ankle = get_point(27)
+                right_ankle = get_point(28)
                 
-                # 绘制关键点
-                for landmark in landmarks:
-                    x = int(landmark.x * width)
-                    y = int(landmark.y * height)
-                    cv2.circle(img, (x, y), 5, (255, 0, 0), -1)
+                # 计算中心点
+                neck = (
+                    (left_shoulder[0] + right_shoulder[0]) // 2,
+                    (left_shoulder[1] + right_shoulder[1]) // 2
+                )
+                pelvis = (
+                    (left_hip[0] + right_hip[0]) // 2,
+                    (left_hip[1] + right_hip[1]) // 2
+                )
+                
+                head_height = abs(neck[1] - nose[1]) * 0.8
+                head_top = (nose[0], int(nose[1] - head_height))
+                
+                pose_data = {
+                    'head_top': head_top,
+                    'upper_neck': neck,
+                    'nose': nose,
+                    'left_shoulder': left_shoulder,
+                    'right_shoulder': right_shoulder,
+                    'left_elbow': left_elbow,
+                    'right_elbow': right_elbow,
+                    'left_wrist': left_wrist,
+                    'right_wrist': right_wrist,
+                    'pelvis': pelvis,
+                    'left_hip': left_hip,
+                    'right_hip': right_hip,
+                    'left_knee': left_knee,
+                    'right_knee': right_knee,
+                    'left_ankle': left_ankle,
+                    'right_ankle': right_ankle
+                }
+                
+                # 生成皮影效果
+                return create_shadow_puppet_online(pose_data, img)
         except Exception as e:
             pass
         
@@ -101,6 +138,103 @@ def rotate_bound(image, angle, key_point_y):
 
 def get_distences(x1, y1, x2, y2):
     return ((x1-x2)**2 + (y1-y2)**2)**0.5
+
+def create_shadow_puppet_online(pose_data, original_img=None):
+    """在线版本：创建皮影效果"""
+    try:
+        # 创建黑色背景（皮影戏风格）
+        height, width = original_img.shape[:2] if original_img is not None else (480, 640)
+        shadow_img = np.zeros((height, width, 3), dtype=np.uint8)
+        
+        # 绘制半透明背景
+        shadow_img[:] = (10, 10, 15)
+        
+        # 添加背景光效
+        cv2.circle(shadow_img, (width//2, height//2), 200, (20, 20, 30), -1)
+        
+        data = pose_data
+        
+        # 皮影风格绘制 - 使用黄色和橙色
+        limb_color = (255, 200, 50)  # 金黄色
+        joint_color = (255, 100, 0)  # 橙红色
+        thickness = 4
+        
+        # 绘制头部（圆形）
+        head_center = data.get('upper_neck', (width//2, 100))
+        head_radius = int(get_distences(data.get('head_top', (width//2, 50))[0], 
+                                       data.get('head_top', (width//2, 50))[1],
+                                       data.get('upper_neck', (width//2, 100))[0],
+                                       data.get('upper_neck', (width//2, 100))[1]))
+        head_radius = max(15, min(head_radius, 40))
+        cv2.circle(shadow_img, head_center, head_radius, limb_color, -1)
+        cv2.circle(shadow_img, head_center, head_radius, joint_color, 2)
+        
+        # 绘制身体（躯干）
+        neck = data.get('upper_neck')
+        pelvis = data.get('pelvis')
+        if neck and pelvis:
+            cv2.line(shadow_img, neck, pelvis, limb_color, thickness + 2)
+            
+            # 肩膀宽度
+            left_shoulder = data.get('left_shoulder')
+            right_shoulder = data.get('right_shoulder')
+            if left_shoulder and right_shoulder:
+                cv2.line(shadow_img, left_shoulder, right_shoulder, limb_color, thickness)
+        
+        # 绘制手臂
+        # 左臂
+        if neck and data.get('left_shoulder') and data.get('left_elbow') and data.get('left_wrist'):
+            cv2.line(shadow_img, neck, data['left_shoulder'], limb_color, thickness)
+            cv2.line(shadow_img, data['left_shoulder'], data['left_elbow'], limb_color, thickness)
+            cv2.line(shadow_img, data['left_elbow'], data['left_wrist'], limb_color, thickness)
+        
+        # 右臂
+        if neck and data.get('right_shoulder') and data.get('right_elbow') and data.get('right_wrist'):
+            cv2.line(shadow_img, neck, data['right_shoulder'], limb_color, thickness)
+            cv2.line(shadow_img, data['right_shoulder'], data['right_elbow'], limb_color, thickness)
+            cv2.line(shadow_img, data['right_elbow'], data['right_wrist'], limb_color, thickness)
+        
+        # 绘制腿部
+        # 左腿
+        if pelvis and data.get('left_hip') and data.get('left_knee') and data.get('left_ankle'):
+            cv2.line(shadow_img, pelvis, data['left_hip'], limb_color, thickness)
+            cv2.line(shadow_img, data['left_hip'], data['left_knee'], limb_color, thickness)
+            cv2.line(shadow_img, data['left_knee'], data['left_ankle'], limb_color, thickness)
+        
+        # 右腿
+        if pelvis and data.get('right_hip') and data.get('right_knee') and data.get('right_ankle'):
+            cv2.line(shadow_img, pelvis, data['right_hip'], limb_color, thickness)
+            cv2.line(shadow_img, data['right_hip'], data['right_knee'], limb_color, thickness)
+            cv2.line(shadow_img, data['right_knee'], data['right_ankle'], limb_color, thickness)
+        
+        # 绘制关节点（圆形标记）
+        joint_points = [
+            data.get('head_top'), data.get('upper_neck'), data.get('nose'),
+            data.get('left_shoulder'), data.get('right_shoulder'),
+            data.get('left_elbow'), data.get('right_elbow'),
+            data.get('left_wrist'), data.get('right_wrist'),
+            data.get('pelvis'), data.get('left_hip'), data.get('right_hip'),
+            data.get('left_knee'), data.get('right_knee'),
+            data.get('left_ankle'), data.get('right_ankle')
+        ]
+        
+        for point in joint_points:
+            if point:
+                cv2.circle(shadow_img, point, 6, joint_color, -1)
+                cv2.circle(shadow_img, point, 3, (255, 255, 0), -1)
+        
+        # 添加光晕效果
+        for point in joint_points:
+            if point:
+                cv2.circle(shadow_img, point, 12, (50, 30, 0), -1)
+        
+        return shadow_img
+        
+    except Exception as e:
+        print(f"生成皮影失败: {e}")
+        if original_img is not None:
+            return original_img
+        return np.zeros((480, 640, 3), dtype=np.uint8)
 
 def append_img_by_sk_points(img, append_img_path, key_point_y, first_point, second_point, 
                            append_img_reset_width=None, append_img_max_height_rate=1, 
