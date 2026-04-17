@@ -18,8 +18,8 @@
 ### 1. 克隆项目
 
 ```bash
-git clone <your-repo-url>
-cd py_project
+git clone https://github.com/lxyl1/piying.git
+cd piying
 ```
 
 ### 2. 安装依赖
@@ -55,11 +55,21 @@ wget https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landma
 
 ## 运行程序
 
+### 方式一：Web 版本（推荐）
+
+```bash
+streamlit run app.py
+```
+
+然后在浏览器打开显示的链接，上传照片即可看到皮影效果。
+
+### 方式二：桌面版本（需要摄像头）
+
 ```bash
 python 1.py
 ```
 
-### 操作说明
+#### 操作说明
 
 - **q** - 退出程序
 - 左侧窗口显示摄像头画面

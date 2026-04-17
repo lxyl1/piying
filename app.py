@@ -1,0 +1,267 @@
+import streamlit as st
+import cv2
+import numpy as np
+import mediapipe as mp
+from mediapipe.tasks import python
+from mediapipe.tasks.python import vision
+import mediapipe as mp_base
+import time
+import math
+from PIL import Image
+
+st.set_page_config(page_title="实时皮影戏", layout="wide")
+
+# 全局变量
+_landmarker = None
+
+def init_pose_landmarker():
+    """初始化姿态检测器"""
+    global _landmarker
+    if _landmarker is None:
+        try:
+            base_options = python.BaseOptions(model_asset_path='pose_landmarker_lite.task')
+            options = vision.PoseLandmarkerOptions(
+                base_options=base_options,
+                running_mode=vision.RunningMode.IMAGE,
+                min_pose_detection_confidence=0.5,
+                min_pose_presence_confidence=0.5,
+                min_tracking_confidence=0.5
+            )
+            _landmarker = vision.PoseLandmarker.create_from_options(options)
+            return True
+        except Exception as e:
+            st.error(f"初始化失败: {e}")
+            return False
+    return True
+
+def get_angle(x1, y1, x2, y2):
+    dx = x2 - x1
+    dy = y2 - y1
+    angle = math.degrees(math.atan2(dy, dx))
+    return angle if angle >= 0 else angle + 360
+
+def rotate_bound(image, angle, key_point_y):
+    (h, w) = image.shape[:2]
+    (cx, cy) = (w/2, h/2)
+    (kx, ky) = cx, key_point_y
+    d = abs(ky - cy)
+    
+    M = cv2.getRotationMatrix2D((cx, cy), -angle, 1.0)
+    cos = np.abs(M[0, 0])
+    sin = np.abs(M[0, 1])
+    
+    nW = int((h*sin) + (w*cos))
+    nH = int((h*cos) + (w*sin))
+    
+    move_x = nW/2 + np.sin(angle/180*np.pi)*d 
+    move_y = nH/2 - np.cos(angle/180*np.pi)*d
+    
+    M[0, 2] += (nW/2) - cx
+    M[1, 2] += (nH/2) - cy
+
+    return cv2.warpAffine(image, M, (nW, nH)), int(move_x), int(move_y)
+
+def get_distences(x1, y1, x2, y2):
+    return ((x1-x2)**2 + (y1-y2)**2)**0.5
+
+def append_img_by_sk_points(img, append_img_path, key_point_y, first_point, second_point, 
+                           append_img_reset_width=None, append_img_max_height_rate=1, 
+                           middle_flip=False, append_img_max_height=None):
+    try:
+        if not append_img_path or not os.path.exists(append_img_path):
+            return img
+            
+        append_image = cv2.imdecode(np.fromfile(append_img_path, dtype=np.uint8), cv2.IMREAD_UNCHANGED)
+        if append_image is None:
+            return img
+            
+        sk_height = int(get_distences(first_point[0], first_point[1], second_point[0], second_point[1]) * append_img_max_height_rate)
+        
+        if append_img_max_height:
+            sk_height = min(sk_height, append_img_max_height)
+        
+        sk_height = max(1, sk_height)
+        
+        if append_img_reset_width is None:
+            sk_width = max(1, int(sk_height / append_image.shape[0] * append_image.shape[1]))
+        else:
+            sk_width = max(1, int(append_img_reset_width))
+        
+        if append_image.shape[0] > 0:
+            key_point_y_new = int(key_point_y / append_image.shape[0] * sk_height)
+        else:
+            key_point_y_new = key_point_y
+            
+        append_image = cv2.resize(append_image, (sk_width, sk_height))
+        
+        img_height, img_width = img.shape[:2]
+        
+        if middle_flip:
+            middle_x = int(img_width / 2)
+            if first_point[0] < middle_x and second_point[0] < middle_x:
+                append_image = cv2.flip(append_image, 1)
+        
+        angle = get_angle(first_point[0], first_point[1], second_point[0], second_point[1])
+        append_image, move_x, move_y = rotate_bound(append_image, angle=angle, key_point_y=key_point_y_new)
+        
+        app_img_height, app_img_width = append_image.shape[:2]
+        
+        zero_x = first_point[0] - move_x
+        zero_y = first_point[1] - move_y
+        
+        if len(append_image.shape) == 3:
+            r_channel = append_image[:, :, 2]
+            mask = (r_channel > 200) & (r_channel < 230)
+            
+            valid_rows = np.where(mask.any(axis=1))[0]
+            if len(valid_rows) == 0:
+                return img
+            
+            min_row, max_row = valid_rows[0], valid_rows[-1] + 1
+            
+            for i in range(min_row, max_row):
+                valid_cols = np.where(mask[i])[0]
+                if len(valid_cols) == 0:
+                    continue
+                
+                target_y = zero_y + i
+                if 0 <= target_y < img_height:
+                    for j in valid_cols:
+                        target_x = zero_x + j
+                        if 0 <= target_x < img_width:
+                            img[target_y][target_x] = append_image[i][j]
+        
+        return img
+        
+    except Exception as e:
+        return img
+
+def detect_pose(image):
+    """姿态检测"""
+    global _landmarker
+    
+    if not init_pose_landmarker():
+        return None
+    
+    try:
+        image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+        mp_image = mp_base.Image(image_format=mp_base.ImageFormat.SRGB, data=image_rgb)
+        
+        result = _landmarker.detect(mp_image)
+        
+        if result.pose_landmarks and len(result.pose_landmarks) > 0:
+            landmarks = result.pose_landmarks[0]
+            height, width = image.shape[:2]
+            
+            def get_point(landmark_id):
+                return (
+                    int(landmarks[landmark_id].x * width),
+                    int(landmarks[landmark_id].y * height)
+                )
+            
+            nose = get_point(0)
+            left_shoulder = get_point(11)
+            right_shoulder = get_point(12)
+            left_elbow = get_point(13)
+            right_elbow = get_point(14)
+            left_wrist = get_point(15)
+            right_wrist = get_point(16)
+            left_hip = get_point(23)
+            right_hip = get_point(24)
+            left_knee = get_point(25)
+            right_knee = get_point(26)
+            left_ankle = get_point(27)
+            right_ankle = get_point(28)
+            
+            neck = (
+                (left_shoulder[0] + right_shoulder[0]) // 2,
+                (left_shoulder[1] + right_shoulder[1]) // 2
+            )
+            pelvis = (
+                (left_hip[0] + right_hip[0]) // 2,
+                (left_hip[1] + right_hip[1]) // 2
+            )
+            
+            head_height = abs(neck[1] - nose[1]) * 0.8
+            head_top = (nose[0], int(nose[1] - head_height))
+            
+            return {
+                'head_top': head_top,
+                'upper_neck': neck,
+                'nose': nose,
+                'left_shoulder': left_shoulder,
+                'right_shoulder': right_shoulder,
+                'left_elbow': left_elbow,
+                'right_elbow': right_elbow,
+                'left_wrist': left_wrist,
+                'right_wrist': right_wrist,
+                'pelvis': pelvis,
+                'left_hip': left_hip,
+                'right_hip': right_hip,
+                'left_knee': left_knee,
+                'right_knee': right_knee,
+                'left_ankle': left_ankle,
+                'right_ankle': right_ankle
+            }
+    except Exception as e:
+        st.error(f"检测错误: {e}")
+    
+    return None
+
+def create_shadow_puppet(data, background_path='./background.jpg'):
+    """生成皮影效果"""
+    try:
+        backgroup_image = cv2.imread(background_path)
+        if backgroup_image is None:
+            backgroup_image = np.ones((480, 640, 3), dtype=np.uint8) * 200
+        
+        image_flag = backgroup_image.copy()
+        
+        head_neck_dist = get_distences(data['head_top'][0], data['head_top'][1],
+                                     data['upper_neck'][0], data['upper_neck'][1])
+        min_width = max(10, int(head_neck_dist / 3))
+        
+        shoulder_width = get_distences(data['left_shoulder'][0], data['left_shoulder'][1],
+                                     data['right_shoulder'][0], data['right_shoulder'][1])
+        
+        # 这里简化处理，实际项目需要素材文件
+        # 绘制关键点用于演示
+        for point in data.values():
+            cv2.circle(image_flag, point, 5, (255, 0, 0), -1)
+        
+        return image_flag
+        
+    except Exception as e:
+        st.error(f"生成错误: {e}")
+        return None
+
+# UI
+st.title("🎭 实时皮影戏系统")
+st.markdown("基于 MediaPipe 姿态识别")
+
+uploaded_file = st.file_uploader("上传照片或开启摄像头", type=['jpg', 'jpeg', 'png'])
+
+if uploaded_file:
+    image = Image.open(uploaded_file)
+    img_array = np.array(image)
+    
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        st.image(image, caption="原始图片", use_container_width=True)
+    
+    # 姿态检测
+    img_cv = cv2.cvtColor(img_array, cv2.COLOR_RGB2BGR)
+    pose_data = detect_pose(img_cv)
+    
+    if pose_data:
+        shadow_img = create_shadow_puppet(pose_data)
+        if shadow_img is not None:
+            shadow_rgb = cv2.cvtColor(shadow_img, cv2.COLOR_BGR2RGB)
+            with col2:
+                st.image(shadow_rgb, caption="皮影效果", use_container_width=True)
+    else:
+        st.warning("未检测到人体姿态")
+
+else:
+    st.info("请上传包含人物的照片")
