@@ -43,7 +43,16 @@ class ShadowPuppetTransformer(VideoTransformerBase):
     
     def init_detector(self):
         try:
-            base_options = python.BaseOptions(model_asset_path='pose_landmarker_lite.task')
+            # 检查模型文件是否存在
+            model_path = 'pose_landmarker_lite.task'
+            if not os.path.exists(model_path):
+                print("模型文件不存在，尝试下载...")
+                import urllib.request
+                url = 'https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/latest/pose_landmarker_lite.task'
+                urllib.request.urlretrieve(url, model_path)
+                print("模型下载完成")
+            
+            base_options = python.BaseOptions(model_asset_path=model_path)
             options = vision.PoseLandmarkerOptions(
                 base_options=base_options,
                 running_mode=vision.RunningMode.IMAGE,
@@ -52,6 +61,7 @@ class ShadowPuppetTransformer(VideoTransformerBase):
                 min_tracking_confidence=0.5
             )
             self.landmarker = vision.PoseLandmarker.create_from_options(options)
+            print("检测器初始化成功")
         except Exception as e:
             print(f"初始化失败: {e}")
     
@@ -62,6 +72,9 @@ class ShadowPuppetTransformer(VideoTransformerBase):
         # 创建双窗口显示：左边摄像头，右边皮影
         combined = np.zeros((height, width * 2, 3), dtype=np.uint8)
         combined[:, :width] = img  # 左边放原始摄像头画面
+        
+        # 右边默认米色背景
+        combined[:, width:] = np.ones((height, width, 3), dtype=np.uint8) * 220
         
         if self.landmarker is None:
             return combined
