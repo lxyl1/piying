@@ -8,16 +8,20 @@ import mediapipe as mp_base
 import time
 import math
 from PIL import Image
+import os
+from streamlit_webrtc import webrtc_streamer, VideoTransformerBase
 
 st.set_page_config(page_title="实时皮影戏", layout="wide")
 
 # 全局变量
 _landmarker = None
 
-def init_pose_landmarker():
-    """初始化姿态检测器"""
-    global _landmarker
-    if _landmarker is None:
+class PoseDetector(VideoTransformerBase):
+    def __init__(self):
+        self.landmarker = None
+        self.init_detector()
+    
+    def init_detector(self):
         try:
             base_options = python.BaseOptions(model_asset_path='pose_landmarker_lite.task')
             options = vision.PoseLandmarkerOptions(
@@ -27,12 +31,46 @@ def init_pose_landmarker():
                 min_pose_presence_confidence=0.5,
                 min_tracking_confidence=0.5
             )
-            _landmarker = vision.PoseLandmarker.create_from_options(options)
-            return True
+            self.landmarker = vision.PoseLandmarker.create_from_options(options)
         except Exception as e:
-            st.error(f"初始化失败: {e}")
-            return False
-    return True
+            print(f"初始化失败: {e}")
+    
+    def transform(self, frame):
+        img = frame.to_ndarray(format="bgr24")
+        
+        if self.landmarker is None:
+            return img
+        
+        try:
+            mp_image = mp_base.Image(image_format=mp_base.ImageFormat.SRGB, data=cv2.cvtColor(img, cv2.COLOR_BGR2RGB))
+            result = self.landmarker.detect(mp_image)
+            
+            if result.pose_landmarks and len(result.pose_landmarks) > 0:
+                landmarks = result.pose_landmarks[0]
+                height, width = img.shape[:2]
+                
+                # 绘制骨架
+                connections = [
+                    (11, 12), (11, 13), (13, 15), (12, 14), (14, 16),
+                    (11, 23), (12, 24), (23, 24), (23, 25), (24, 26),
+                    (25, 27), (26, 28)
+                ]
+                
+                for id1, id2 in connections:
+                    if id1 < len(landmarks) and id2 < len(landmarks):
+                        pt1 = (int(landmarks[id1].x * width), int(landmarks[id1].y * height))
+                        pt2 = (int(landmarks[id2].x * width), int(landmarks[id2].y * height))
+                        cv2.line(img, pt1, pt2, (0, 255, 0), 2)
+                
+                # 绘制关键点
+                for landmark in landmarks:
+                    x = int(landmark.x * width)
+                    y = int(landmark.y * height)
+                    cv2.circle(img, (x, y), 5, (255, 0, 0), -1)
+        except Exception as e:
+            pass
+        
+        return img
 
 def get_angle(x1, y1, x2, y2):
     dx = x2 - x1
@@ -239,29 +277,69 @@ def create_shadow_puppet(data, background_path='./background.jpg'):
 st.title("🎭 实时皮影戏系统")
 st.markdown("基于 MediaPipe 姿态识别")
 
-uploaded_file = st.file_uploader("上传照片或开启摄像头", type=['jpg', 'jpeg', 'png'])
+mode = st.radio("选择模式", ["摄像头实时", "上传照片"])
 
-if uploaded_file:
-    image = Image.open(uploaded_file)
-    img_array = np.array(image)
-    
-    col1, col2 = st.columns(2)
-    
-    with col1:
-        st.image(image, caption="原始图片", use_container_width=True)
-    
-    # 姿态检测
-    img_cv = cv2.cvtColor(img_array, cv2.COLOR_RGB2BGR)
-    pose_data = detect_pose(img_cv)
-    
-    if pose_data:
-        shadow_img = create_shadow_puppet(pose_data)
-        if shadow_img is not None:
-            shadow_rgb = cv2.cvtColor(shadow_img, cv2.COLOR_BGR2RGB)
-            with col2:
-                st.image(shadow_rgb, caption="皮影效果", use_container_width=True)
-    else:
-        st.warning("未检测到人体姿态")
-
+if mode == "摄像头实时":
+    st.info("请允许浏览器访问摄像头")
+    webrtc_streamer(key="pose-detector", video_transformer_factory=PoseDetector)
 else:
-    st.info("请上传包含人物的照片")
+    uploaded_file = st.file_uploader("上传照片", type=['jpg', 'jpeg', 'png'])
+    
+    if uploaded_file:
+        image = Image.open(uploaded_file)
+        img_array = np.array(image)
+        
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            st.image(image, caption="原始图片", use_container_width=True)
+        
+        # 姿态检测
+        img_cv = cv2.cvtColor(img_array, cv2.COLOR_RGB2BGR)
+        
+        # 临时初始化检测器
+        try:
+            base_options = python.BaseOptions(model_asset_path='pose_landmarker_lite.task')
+            options = vision.PoseLandmarkerOptions(
+                base_options=base_options,
+                running_mode=vision.RunningMode.IMAGE,
+                min_pose_detection_confidence=0.5,
+                min_pose_presence_confidence=0.5,
+                min_tracking_confidence=0.5
+            )
+            temp_landmarker = vision.PoseLandmarker.create_from_options(options)
+            
+            mp_image = mp_base.Image(image_format=mp_base.ImageFormat.SRGB, data=cv2.cvtColor(img_cv, cv2.COLOR_BGR2RGB))
+            result = temp_landmarker.detect(mp_image)
+            
+            if result.pose_landmarks and len(result.pose_landmarks) > 0:
+                landmarks = result.pose_landmarks[0]
+                height, width = img_cv.shape[:2]
+                
+                # 绘制骨架
+                connections = [
+                    (11, 12), (11, 13), (13, 15), (12, 14), (14, 16),
+                    (11, 23), (12, 24), (23, 24), (23, 25), (24, 26),
+                    (25, 27), (26, 28)
+                ]
+                
+                img_with_pose = img_cv.copy()
+                for id1, id2 in connections:
+                    if id1 < len(landmarks) and id2 < len(landmarks):
+                        pt1 = (int(landmarks[id1].x * width), int(landmarks[id1].y * height))
+                        pt2 = (int(landmarks[id2].x * width), int(landmarks[id2].y * height))
+                        cv2.line(img_with_pose, pt1, pt2, (0, 255, 0), 2)
+                
+                for landmark in landmarks:
+                    x = int(landmark.x * width)
+                    y = int(landmark.y * height)
+                    cv2.circle(img_with_pose, (x, y), 5, (255, 0, 0), -1)
+                
+                with col2:
+                    st.image(cv2.cvtColor(img_with_pose, cv2.COLOR_BGR2RGB), caption="检测结果", use_container_width=True)
+            else:
+                st.warning("未检测到人体姿态")
+        except Exception as e:
+            st.error(f"检测失败: {e}")
+    else:
+        st.info("请上传包含人物的照片")
