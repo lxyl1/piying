@@ -16,7 +16,27 @@ st.set_page_config(page_title="实时皮影戏", layout="wide")
 # 全局变量
 _landmarker = None
 
-class PoseDetector(VideoTransformerBase):
+def init_pose_landmarker():
+    """初始化姿态检测器"""
+    global _landmarker
+    if _landmarker is None:
+        try:
+            base_options = python.BaseOptions(model_asset_path='pose_landmarker_lite.task')
+            options = vision.PoseLandmarkerOptions(
+                base_options=base_options,
+                running_mode=vision.RunningMode.IMAGE,
+                min_pose_detection_confidence=0.5,
+                min_pose_presence_confidence=0.5,
+                min_tracking_confidence=0.5
+            )
+            _landmarker = vision.PoseLandmarker.create_from_options(options)
+            return True
+        except Exception as e:
+            print(f"初始化失败: {e}")
+            return False
+    return True
+
+class ShadowPuppetTransformer(VideoTransformerBase):
     def __init__(self):
         self.landmarker = None
         self.init_detector()
@@ -37,9 +57,14 @@ class PoseDetector(VideoTransformerBase):
     
     def transform(self, frame):
         img = frame.to_ndarray(format="bgr24")
+        height, width = img.shape[:2]
+        
+        # 创建双窗口显示：左边摄像头，右边皮影
+        combined = np.zeros((height, width * 2, 3), dtype=np.uint8)
+        combined[:, :width] = img  # 左边放原始摄像头画面
         
         if self.landmarker is None:
-            return img
+            return combined
         
         try:
             mp_image = mp_base.Image(image_format=mp_base.ImageFormat.SRGB, data=cv2.cvtColor(img, cv2.COLOR_BGR2RGB))
@@ -47,11 +72,10 @@ class PoseDetector(VideoTransformerBase):
             
             if result.pose_landmarks and len(result.pose_landmarks) > 0:
                 landmarks = result.pose_landmarks[0]
-                height, width = img.shape[:2]
                 
                 def get_point(landmark_id):
                     return (
-                        int(landmarks[landmark_id].x * width),
+                        int(landmarks[landmark_id].x * width) + width,  # 偏移到右边窗口
                         int(landmarks[landmark_id].y * height)
                     )
                 
@@ -102,12 +126,79 @@ class PoseDetector(VideoTransformerBase):
                     'right_ankle': right_ankle
                 }
                 
-                # 生成皮影效果
-                return create_shadow_puppet_online(pose_data, img)
+                # 生成红色剪纸风格皮影
+                shadow_img = create_red_paper_cut(pose_data, width, height)
+                combined[:, width:] = shadow_img
         except Exception as e:
-            pass
+            print(f"检测错误: {e}")
         
-        return img
+        return combined
+
+def create_red_paper_cut(pose_data, width, height):
+    """创建红色剪纸风格皮影"""
+    # 创建米色背景
+    shadow_img = np.ones((height, width, 3), dtype=np.uint8) * 220
+    
+    # 皮影风格绘制 - 红色
+    limb_color = (0, 0, 255)  # 红色（BGR）
+    thickness = 6
+    
+    data = pose_data
+    
+    # 绘制头部
+    head_center = data.get('upper_neck', (width//2 + width, 100))
+    head_radius = 30
+    cv2.circle(shadow_img, head_center, head_radius, limb_color, -1)
+    
+    # 绘制身体
+    neck = data.get('upper_neck')
+    pelvis = data.get('pelvis')
+    if neck and pelvis:
+        cv2.line(shadow_img, neck, pelvis, limb_color, thickness + 4)
+        
+        left_shoulder = data.get('left_shoulder')
+        right_shoulder = data.get('right_shoulder')
+        if left_shoulder and right_shoulder:
+            cv2.line(shadow_img, left_shoulder, right_shoulder, limb_color, thickness)
+    
+    # 绘制手臂
+    if neck and data.get('left_shoulder') and data.get('left_elbow') and data.get('left_wrist'):
+        cv2.line(shadow_img, neck, data['left_shoulder'], limb_color, thickness)
+        cv2.line(shadow_img, data['left_shoulder'], data['left_elbow'], limb_color, thickness)
+        cv2.line(shadow_img, data['left_elbow'], data['left_wrist'], limb_color, thickness)
+    
+    if neck and data.get('right_shoulder') and data.get('right_elbow') and data.get('right_wrist'):
+        cv2.line(shadow_img, neck, data['right_shoulder'], limb_color, thickness)
+        cv2.line(shadow_img, data['right_shoulder'], data['right_elbow'], limb_color, thickness)
+        cv2.line(shadow_img, data['right_elbow'], data['right_wrist'], limb_color, thickness)
+    
+    # 绘制腿部
+    if pelvis and data.get('left_hip') and data.get('left_knee') and data.get('left_ankle'):
+        cv2.line(shadow_img, pelvis, data['left_hip'], limb_color, thickness)
+        cv2.line(shadow_img, data['left_hip'], data['left_knee'], limb_color, thickness)
+        cv2.line(shadow_img, data['left_knee'], data['left_ankle'], limb_color, thickness)
+    
+    if pelvis and data.get('right_hip') and data.get('right_knee') and data.get('right_ankle'):
+        cv2.line(shadow_img, pelvis, data['right_hip'], limb_color, thickness)
+        cv2.line(shadow_img, data['right_hip'], data['right_knee'], limb_color, thickness)
+        cv2.line(shadow_img, data['right_knee'], data['right_ankle'], limb_color, thickness)
+    
+    # 绘制关节点
+    joint_points = [
+        data.get('head_top'), data.get('upper_neck'), data.get('nose'),
+        data.get('left_shoulder'), data.get('right_shoulder'),
+        data.get('left_elbow'), data.get('right_elbow'),
+        data.get('left_wrist'), data.get('right_wrist'),
+        data.get('pelvis'), data.get('left_hip'), data.get('right_hip'),
+        data.get('left_knee'), data.get('right_knee'),
+        data.get('left_ankle'), data.get('right_ankle')
+    ]
+    
+    for point in joint_points:
+        if point:
+            cv2.circle(shadow_img, point, 8, limb_color, -1)
+    
+    return shadow_img
 
 def get_angle(x1, y1, x2, y2):
     dx = x2 - x1
@@ -415,7 +506,7 @@ mode = st.radio("选择模式", ["摄像头实时", "上传照片"])
 
 if mode == "摄像头实时":
     st.info("请允许浏览器访问摄像头")
-    webrtc_streamer(key="pose-detector", video_transformer_factory=PoseDetector)
+    webrtc_streamer(key="shadow-puppet", video_transformer_factory=ShadowPuppetTransformer)
 else:
     uploaded_file = st.file_uploader("上传照片", type=['jpg', 'jpeg', 'png'])
     
